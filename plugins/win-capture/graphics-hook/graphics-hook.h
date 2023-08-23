@@ -1,13 +1,15 @@
 #pragma once
 
-#include "graphics-hook-config.h"
-
 #ifdef _MSC_VER
 /* conversion from data/function pointer */
 #pragma warning(disable : 4152)
 #endif
 
+#ifdef OBS_LEGACY
 #include "../graphics-hook-info.h"
+#else
+#include <graphics-hook-info.h>
+#endif
 #include <ipc-util/pipe.h>
 #include <psapi.h>
 
@@ -20,6 +22,13 @@ extern "C" {
 #endif
 
 #define NUM_BUFFERS 3
+#define HOOK_VERBOSE_LOGGING 0
+
+#if HOOK_VERBOSE_LOGGING
+#define hlog_verbose(...) hlog(__VA_ARGS__)
+#else
+#define hlog_verbose(...) (void)0
+#endif
 
 extern void hlog(const char *format, ...);
 extern void hlog_hr(const char *text, HRESULT hr);
@@ -43,35 +52,31 @@ extern void shmem_texture_data_unlock(int idx);
 extern bool hook_ddraw(void);
 extern bool hook_d3d8(void);
 extern bool hook_d3d9(void);
+extern bool hook_d3d12(void);
 extern bool hook_dxgi(void);
 extern bool hook_gl(void);
-#if COMPILE_VULKAN_HOOK
+#ifdef COMPILE_VULKAN_HOOK
 extern bool hook_vulkan(void);
 #endif
 
-extern void d3d10_capture(void *swap, void *backbuffer, bool capture_overlay);
+extern void d3d10_capture(void *swap, void *backbuffer);
 extern void d3d10_free(void);
-extern void d3d11_capture(void *swap, void *backbuffer, bool capture_overlay);
+extern void d3d11_capture(void *swap, void *backbuffer);
 extern void d3d11_free(void);
 
-#if COMPILE_D3D12_HOOK
-extern void d3d12_capture(void *swap, void *backbuffer, bool capture_overlay);
+#ifdef COMPILE_D3D12_HOOK
+extern void d3d12_capture(void *swap, void *backbuffer);
 extern void d3d12_free(void);
 #endif
-
-extern uint8_t *get_d3d1x_vertex_shader(size_t *size);
-extern uint8_t *get_d3d1x_pixel_shader(size_t *size);
 
 extern bool rehook_gl(void);
 
 extern bool capture_init_shtex(struct shtex_data **data, HWND window,
-			       uint32_t base_cx, uint32_t base_cy, uint32_t cx,
-			       uint32_t cy, uint32_t format, bool flip,
-			       uintptr_t handle);
+			       uint32_t cx, uint32_t cy, uint32_t format,
+			       bool flip, uintptr_t handle);
 extern bool capture_init_shmem(struct shmem_data **data, HWND window,
-			       uint32_t base_cx, uint32_t base_cy, uint32_t cx,
-			       uint32_t cy, uint32_t pitch, uint32_t format,
-			       bool flip);
+			       uint32_t cx, uint32_t cy, uint32_t pitch,
+			       uint32_t format, bool flip);
 extern void capture_free(void);
 
 extern struct hook_info *global_hook_info;
@@ -224,16 +229,40 @@ extern bool init_pipe(void);
 
 static inline bool capture_should_init(void)
 {
-	if (!capture_active() && capture_restarted()) {
-		if (capture_alive()) {
-			if (!ipc_pipe_client_valid(&pipe)) {
-				init_pipe();
+	bool should_init = false;
+
+	if (!capture_active()) {
+		if (capture_restarted()) {
+			if (capture_alive()) {
+				if (!ipc_pipe_client_valid(&pipe)) {
+					init_pipe();
+				}
+
+				should_init = true;
+			} else {
+				hlog_verbose(
+					"capture_should_init: inactive, restarted, not alive");
 			}
-			return true;
+		} else {
+			hlog_verbose(
+				"capture_should_init: inactive, not restarted");
 		}
 	}
 
+	return should_init;
+}
+
+#if COMPILE_VULKAN_HOOK
+extern __declspec(thread) int vk_presenting;
+#endif
+
+static inline bool should_passthrough()
+{
+#if COMPILE_VULKAN_HOOK
+	return vk_presenting > 0;
+#else
 	return false;
+#endif
 }
 
 #ifdef __cplusplus

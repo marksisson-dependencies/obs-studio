@@ -1,19 +1,19 @@
-project(image-source)
+cmake_minimum_required(VERSION 3.22...3.25)
 
-if(MSVC)
-	set(image-source_PLATFORM_DEPS
-		w32-pthreads)
+legacy_check()
+
+add_library(image-source MODULE)
+add_library(OBS::image-source ALIAS image-source)
+
+target_sources(image-source PRIVATE color-source.c image-source.c obs-slideshow.c)
+
+target_link_libraries(image-source PRIVATE OBS::libobs)
+
+if(OS_WINDOWS)
+  target_link_libraries(image-source PRIVATE OBS::w32-pthreads)
+
+  configure_file(cmake/windows/obs-module.rc.in image-source.rc)
+  target_sources(image-source PRIVATE image-source.rc)
 endif()
 
-set(image-source_SOURCES
-	image-source.c
-	color-source.c
-	obs-slideshow.c)
-
-add_library(image-source MODULE
-	${image-source_SOURCES})
-target_link_libraries(image-source
-	libobs
-	${image-source_PLATFORM_DEPS})
-
-install_obs_plugin_with_data(image-source data)
+set_target_properties_obs(image-source PROPERTIES FOLDER plugins PREFIX "")

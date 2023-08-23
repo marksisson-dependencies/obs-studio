@@ -2,6 +2,7 @@
 
 #include <obs.hpp>
 #include <util/platform.h>
+#include <obs-frontend-api.h>
 #include <QPointer>
 #include <QWidget>
 #include <QTimer>
@@ -11,7 +12,7 @@
 class QGridLayout;
 class QCloseEvent;
 
-class OBSBasicStats : public QWidget {
+class OBSBasicStats : public QFrame {
 	Q_OBJECT
 
 	QLabel *fps = nullptr;

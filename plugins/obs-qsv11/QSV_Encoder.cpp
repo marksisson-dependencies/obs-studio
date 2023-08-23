@@ -59,10 +59,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "QSV_Encoder.h"
 #include "QSV_Encoder_Internal.h"
+#include "common_utils.h"
 #include <obs-module.h>
 #include <string>
 #include <atomic>
-#include <intrin.h>
 
 #define do_log(level, format, ...) \
 	blog(level, "[qsv encoder: '%s'] " format, "msdk_impl", ##__VA_ARGS__)
@@ -77,10 +77,33 @@ void qsv_encoder_version(unsigned short *major, unsigned short *minor)
 	*minor = ver.Minor;
 }
 
-qsv_t *qsv_encoder_open(qsv_param_t *pParams)
+qsv_t *qsv_encoder_open(qsv_param_t *pParams, enum qsv_codec codec)
 {
-	QSV_Encoder_Internal *pEncoder = new QSV_Encoder_Internal(impl, ver);
-	mfxStatus sts = pEncoder->Open(pParams);
+	obs_video_info ovi;
+	obs_get_video_info(&ovi);
+	size_t adapter_idx = ovi.adapter;
+
+	// Select current adapter - will be iGPU if exists due to adapter reordering
+	if (codec == QSV_CODEC_AV1 && !adapters[adapter_idx].supports_av1) {
+		for (size_t i = 0; i < 4; i++) {
+			if (adapters[i].supports_av1) {
+				adapter_idx = i;
+				break;
+			}
+		}
+	} else if (!adapters[adapter_idx].is_intel) {
+		for (size_t i = 0; i < 4; i++) {
+			if (adapters[i].is_intel) {
+				adapter_idx = i;
+				break;
+			}
+		}
+	}
+
+	bool isDGPU = adapters[adapter_idx].is_dgpu;
+
+	QSV_Encoder_Internal *pEncoder = new QSV_Encoder_Internal(ver, isDGPU);
+	mfxStatus sts = pEncoder->Open(pParams, codec);
 	if (sts != MFX_ERR_NONE) {
 
 #define WARN_ERR_IMPL(err, str, err_name)                   \
@@ -168,6 +191,12 @@ qsv_t *qsv_encoder_open(qsv_param_t *pParams)
 	return (qsv_t *)pEncoder;
 }
 
+bool qsv_encoder_is_dgpu(qsv_t *pContext)
+{
+	QSV_Encoder_Internal *pEncoder = (QSV_Encoder_Internal *)pContext;
+	return pEncoder->IsDGPU();
+}
+
 int qsv_encoder_headers(qsv_t *pContext, uint8_t **pSPS, uint8_t **pPPS,
 			uint16_t *pnSPS, uint16_t *pnPPS)
 {
@@ -187,6 +216,23 @@ int qsv_encoder_encode(qsv_t *pContext, uint64_t ts, uint8_t *pDataY,
 	if (pDataY != NULL && pDataUV != NULL)
 		sts = pEncoder->Encode(ts, pDataY, pDataUV, strideY, strideUV,
 				       pBS);
+
+	if (sts == MFX_ERR_NONE)
+		return 0;
+	else if (sts == MFX_ERR_MORE_DATA)
+		return 1;
+	else
+		return -1;
+}
+
+int qsv_encoder_encode_tex(qsv_t *pContext, uint64_t ts, uint32_t tex_handle,
+			   uint64_t lock_key, uint64_t *next_key,
+			   mfxBitstream **pBS)
+{
+	QSV_Encoder_Internal *pEncoder = (QSV_Encoder_Internal *)pContext;
+	mfxStatus sts = MFX_ERR_NONE;
+
+	sts = pEncoder->Encode_tex(ts, tex_handle, lock_key, next_key, pBS);
 
 	if (sts == MFX_ERR_NONE)
 		return 0;
@@ -228,12 +274,12 @@ int qsv_param_apply_profile(qsv_param_t *, const char *profile)
 int qsv_encoder_reconfig(qsv_t *pContext, qsv_param_t *pParams)
 {
 	QSV_Encoder_Internal *pEncoder = (QSV_Encoder_Internal *)pContext;
-	mfxStatus sts = pEncoder->Reset(pParams);
+	pEncoder->UpdateParams(pParams);
+	mfxStatus sts = pEncoder->ReconfigureEncoder();
 
-	if (sts == MFX_ERR_NONE)
-		return 0;
-	else
-		return -1;
+	if (sts != MFX_ERR_NONE)
+		return false;
+	return true;
 }
 
 enum qsv_cpu_platform qsv_get_cpu_platform()
@@ -241,7 +287,7 @@ enum qsv_cpu_platform qsv_get_cpu_platform()
 	using std::string;
 
 	int cpuInfo[4];
-	__cpuid(cpuInfo, 0);
+	util_cpuid(cpuInfo, 0);
 
 	string vendor;
 	vendor += string((char *)&cpuInfo[1], 4);
@@ -251,9 +297,10 @@ enum qsv_cpu_platform qsv_get_cpu_platform()
 	if (vendor != "GenuineIntel")
 		return QSV_CPU_PLATFORM_UNKNOWN;
 
-	__cpuid(cpuInfo, 1);
-	BYTE model = ((cpuInfo[0] >> 4) & 0xF) + ((cpuInfo[0] >> 12) & 0xF0);
-	BYTE family = ((cpuInfo[0] >> 8) & 0xF) + ((cpuInfo[0] >> 20) & 0xFF);
+	util_cpuid(cpuInfo, 1);
+	uint8_t model = ((cpuInfo[0] >> 4) & 0xF) + ((cpuInfo[0] >> 12) & 0xF0);
+	uint8_t family =
+		((cpuInfo[0] >> 8) & 0xF) + ((cpuInfo[0] >> 20) & 0xFF);
 
 	// See Intel 64 and IA-32 Architectures Software Developer's Manual,
 	// Vol 3C Table 35-1
@@ -300,9 +347,15 @@ enum qsv_cpu_platform qsv_get_cpu_platform()
 	case 0x4e:
 	case 0x5e:
 		return QSV_CPU_PLATFORM_SKL;
+	case 0x5c:
+		return QSV_CPU_PLATFORM_APL;
 	case 0x8e:
 	case 0x9e:
 		return QSV_CPU_PLATFORM_KBL;
+	case 0x7a:
+		return QSV_CPU_PLATFORM_GLK;
+	case 0x66:
+		return QSV_CPU_PLATFORM_CNL;
 	case 0x7d:
 	case 0x7e:
 		return QSV_CPU_PLATFORM_ICL;
@@ -310,4 +363,14 @@ enum qsv_cpu_platform qsv_get_cpu_platform()
 
 	//assume newer revisions are at least as capable as Haswell
 	return QSV_CPU_PLATFORM_INTEL;
+}
+
+int qsv_hevc_encoder_headers(qsv_t *pContext, uint8_t **pVPS, uint8_t **pSPS,
+			     uint8_t **pPPS, uint16_t *pnVPS, uint16_t *pnSPS,
+			     uint16_t *pnPPS)
+{
+	QSV_Encoder_Internal *pEncoder = (QSV_Encoder_Internal *)pContext;
+	pEncoder->GetVpsSpsPps(pVPS, pSPS, pPPS, pnVPS, pnSPS, pnPPS);
+
+	return 0;
 }

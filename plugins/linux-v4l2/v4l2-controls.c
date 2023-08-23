@@ -46,7 +46,23 @@ static bool v4l2_control_changed(void *data, obs_properties_t *props,
 
 	struct v4l2_control control;
 	control.id = POINTER_TO_UINT(data);
-	control.value = obs_data_get_int(settings, obs_property_name(prop));
+
+	switch (obs_property_get_type(prop)) {
+	case OBS_PROPERTY_BOOL:
+		control.value =
+			obs_data_get_bool(settings, obs_property_name(prop));
+		break;
+	case OBS_PROPERTY_INT:
+	case OBS_PROPERTY_LIST:
+		control.value =
+			obs_data_get_int(settings, obs_property_name(prop));
+		break;
+	default:
+		blog(LOG_ERROR, "unknown property type for %s",
+		     obs_property_name(prop));
+		v4l2_close(dev);
+		return ret;
+	}
 
 	if (0 != v4l2_ioctl(dev, VIDIOC_S_CTRL, &control)) {
 		ret = true;
@@ -57,9 +73,8 @@ static bool v4l2_control_changed(void *data, obs_properties_t *props,
 	return ret;
 }
 
-static int_fast32_t v4l2_update_controls_menu(int_fast32_t dev,
-					      obs_properties_t *props,
-					      struct v4l2_queryctrl *qctrl)
+static bool v4l2_update_controls_menu(int_fast32_t dev, obs_properties_t *props,
+				      struct v4l2_queryctrl *qctrl)
 {
 	obs_property_t *prop;
 	struct v4l2_querymenu qmenu;
@@ -79,11 +94,16 @@ static int_fast32_t v4l2_update_controls_menu(int_fast32_t dev,
 	     qmenu.index += qctrl->step) {
 		if (0 == v4l2_ioctl(dev, VIDIOC_QUERYMENU, &qmenu)) {
 			obs_property_list_add_int(prop, (char *)qmenu.name,
-						  qmenu.value);
+						  qmenu.index);
 		}
 	}
 
-	return 0;
+	if (obs_property_list_item_count(prop) == 0) {
+		obs_properties_remove_by_name(props, (char *)qctrl->name);
+		return false;
+	}
+
+	return true;
 }
 
 #define INVALID_CONTROL_FLAGS                                 \
@@ -95,7 +115,7 @@ static inline bool valid_control(struct v4l2_queryctrl *qctrl)
 	return (qctrl->flags & INVALID_CONTROL_FLAGS) == 0;
 }
 
-static inline bool add_control_property(obs_properties_t *props,
+static inline void add_control_property(obs_properties_t *props,
 					obs_data_t *settings, int_fast32_t dev,
 					struct v4l2_queryctrl *qctrl)
 {
@@ -125,11 +145,12 @@ static inline bool add_control_property(obs_properties_t *props,
 		break;
 	case V4L2_CTRL_TYPE_MENU:
 	case V4L2_CTRL_TYPE_INTEGER_MENU:
-		v4l2_update_controls_menu(dev, props, qctrl);
-		obs_data_set_default_int(settings, (char *)qctrl->name,
-					 qctrl->default_value);
-		blog(LOG_INFO, "setting default for %s to %d",
-		     (char *)qctrl->name, qctrl->default_value);
+		if (v4l2_update_controls_menu(dev, props, qctrl)) {
+			obs_data_set_default_int(settings, (char *)qctrl->name,
+						 qctrl->default_value);
+			blog(LOG_INFO, "setting default for %s to %d",
+			     (char *)qctrl->name, qctrl->default_value);
+		}
 		break;
 	}
 }

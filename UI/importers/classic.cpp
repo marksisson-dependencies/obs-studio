@@ -36,8 +36,6 @@ static bool source_name_exists(const Json::array &sources, const string &name)
 #define translate_int(in_key, in, out_key, out, off) \
 	out[out_key] = in[in_key].int_value() + off;
 #define translate_string(in_key, in, out_key, out) out[out_key] = in[in_key];
-#define translate_double(in_key, in, out_key, out) \
-	translate_string(in_key, in, out_key, out);
 #define translate_bool(in_key, in, out_key, out) \
 	out[out_key] = in[in_key].int_value() == 1;
 
@@ -258,8 +256,6 @@ static Json::object translate_source(const Json &in, const Json &sources)
 		string winClass = in_settings["windowClass"].string_value();
 		string exec = in_settings["executable"].string_value();
 
-		string window = ":" + winClass + ":" + exec;
-
 		settings["window"] = ":" + winClass + ":" + exec;
 
 		translate_bool("captureMouse", in_settings, "capture_cursor",
@@ -273,7 +269,6 @@ static Json::object translate_source(const Json &in, const Json &sources)
 
 #undef translate_int
 #undef translate_string
-#undef translate_double
 #undef translate_bool
 
 static void translate_sc(const Json &in, Json &out)
@@ -298,10 +293,9 @@ static void translate_sc(const Json &in, Json &out)
 	for (size_t i = 0; i < scenes.size(); i++) {
 		Json in_scene = scenes[i];
 
-		if (first_name == "")
+		if (first_name.empty())
 			first_name = in_scene["name"].string_value();
 
-		Json::object settings = Json::object{};
 		Json::array items = Json::array{};
 
 		Json::array sources = in_scene["sources"].array_items();
@@ -391,7 +385,7 @@ static void create_data_item(Json::object &out, const string &line)
 				Json::array new_arr = Json::array{};
 				string str = out[c_name].string_value();
 				create_string_obj(str, new_arr);
-				arr = new_arr;
+				arr = std::move(new_arr);
 			}
 
 			create_string_obj(first, arr);
@@ -408,7 +402,7 @@ static void create_data_item(Json::object &out, const string &line)
 				Json::array new_arr = Json::array{};
 				string str1 = out[c_name].string_value();
 				create_string_obj(str1, new_arr);
-				arr = new_arr;
+				arr = std::move(new_arr);
 			}
 
 			create_string_obj(str, arr);
@@ -431,7 +425,7 @@ static Json::array create_sources(Json::object &out, string &line, string &src)
 
 	line = ReadLine(src);
 	size_t l_len = line.size();
-	while (line != "" && line[l_len - 1] != '}') {
+	while (!line.empty() && line[l_len - 1] != '}') {
 		size_t end_pos = line.find(':');
 
 		if (end_pos == string::npos)
@@ -478,7 +472,7 @@ static Json::object create_object(Json::object &out, string &line, string &src)
 
 	size_t l_len = line.size() - 1;
 
-	while (line != "" && line[l_len] != '}') {
+	while (!line.empty() && line[l_len] != '}') {
 		start_pos = 0;
 		while (line[start_pos] == ' ')
 			start_pos++;
@@ -511,10 +505,8 @@ int ClassicImporter::ImportScenes(const string &path, string &name, Json &res)
 	if (!file_data)
 		return IMPORTER_FILE_WONT_OPEN;
 
-	string sc_name = GetFilenameFromPath(path);
-
-	if (name == "")
-		name = sc_name;
+	if (name.empty())
+		name = GetFilenameFromPath(path);
 
 	Json::object data = Json::object{};
 	data["name"] = name;
@@ -522,7 +514,7 @@ int ClassicImporter::ImportScenes(const string &path, string &name, Json &res)
 	string file = file_data.Get();
 	string line = ReadLine(file);
 
-	while (line != "" && line[0] != '\0') {
+	while (!line.empty() && line[0] != '\0') {
 		string key = line != "global sources : {" ? "scenes"
 							  : "globals";
 
@@ -534,6 +526,11 @@ int ClassicImporter::ImportScenes(const string &path, string &name, Json &res)
 
 	Json sc = data;
 	translate_sc(sc, res);
+
+	QDir dir(path.c_str());
+
+	TranslateOSStudio(res);
+	TranslatePaths(res, QDir::cleanPath(dir.filePath("..")).toStdString());
 
 	return IMPORTER_SUCCESS;
 }

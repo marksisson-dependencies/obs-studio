@@ -1,20 +1,19 @@
-project(obs-ffmpeg-mux)
+cmake_minimum_required(VERSION 3.22...3.25)
 
-find_package(FFmpeg REQUIRED
-	COMPONENTS avcodec avutil avformat)
-include_directories(${FFMPEG_INCLUDE_DIRS})
+legacy_check()
 
-set(obs-ffmpeg-mux_SOURCES
-	ffmpeg-mux.c)
+option(ENABLE_FFMPEG_MUX_DEBUG "Enable FFmpeg-mux debugging" OFF)
 
-set(obs-ffmpeg-mux_HEADERS
-	ffmpeg-mux.h)
+find_package(FFmpeg REQUIRED COMPONENTS avcodec avutil avformat)
 
-add_executable(obs-ffmpeg-mux
-	${obs-ffmpeg-mux_SOURCES}
-	${obs-ffmpeg-mux_HEADERS})
+add_executable(obs-ffmpeg-mux)
+add_executable(OBS::ffmpeg-mux ALIAS obs-ffmpeg-mux)
 
-target_link_libraries(obs-ffmpeg-mux
-	${FFMPEG_LIBRARIES})
+target_sources(obs-ffmpeg-mux PRIVATE ffmpeg-mux.c ffmpeg-mux.h)
 
-install_obs_core(obs-ffmpeg-mux)
+target_link_libraries(obs-ffmpeg-mux PRIVATE OBS::libobs FFmpeg::avcodec FFmpeg::avutil FFmpeg::avformat
+                                             $<$<PLATFORM_ID:Windows>:OBS::w32-pthreads>)
+
+target_compile_definitions(obs-ffmpeg-mux PRIVATE $<$<BOOL:${ENABLE_FFMPEG_MUX_DEBUG}>:ENABLE_FFMPEG_MUX_DEBUG>)
+
+set_target_properties_obs(obs-ffmpeg-mux PROPERTIES FOLDER plugins/obs-ffmpeg)

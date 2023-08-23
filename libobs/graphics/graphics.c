@@ -1,5 +1,5 @@
 /******************************************************************************
-    Copyright (C) 2013 by Hugh Bailey <obs.jim@gmail.com>
+    Copyright (C) 2023 by Lain Bailey <lain@obsproject.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -27,6 +27,13 @@
 #include "axisang.h"
 #include "effect-parser.h"
 #include "effect.h"
+
+#ifdef near
+#undef near
+#endif
+#ifdef far
+#undef far
+#endif
 
 static THREAD_LOCAL graphics_t *thread_graphics = NULL;
 
@@ -164,6 +171,10 @@ static bool graphics_init(struct graphics_subsystem *graphics)
 	graphics->cur_blend_state.dest_c = GS_BLEND_INVSRCALPHA;
 	graphics->cur_blend_state.src_a = GS_BLEND_ONE;
 	graphics->cur_blend_state.dest_a = GS_BLEND_INVSRCALPHA;
+
+	graphics->cur_blend_state.op = GS_BLEND_OP_ADD;
+	graphics->exports.device_blend_op(graphics->device,
+					  graphics->cur_blend_state.op);
 
 	graphics->exports.device_leave_context(graphics->device);
 
@@ -1143,33 +1154,38 @@ void gs_texture_set_image(gs_texture_t *tex, const uint8_t *data,
 {
 	uint8_t *ptr;
 	uint32_t linesize_out;
-	uint32_t row_copy;
-	int32_t height;
-	int32_t y;
+	size_t row_copy;
+	size_t height;
 
 	if (!gs_valid_p2("gs_texture_set_image", tex, data))
 		return;
-
-	height = (int32_t)gs_texture_get_height(tex);
 
 	if (!gs_texture_map(tex, &ptr, &linesize_out))
 		return;
 
 	row_copy = (linesize < linesize_out) ? linesize : linesize_out;
 
+	height = gs_texture_get_height(tex);
+
 	if (flip) {
-		for (y = height - 1; y >= 0; y--)
-			memcpy(ptr + (uint32_t)y * linesize_out,
-			       data + (uint32_t)(height - y - 1) * linesize,
-			       row_copy);
+		uint8_t *const end = ptr + height * linesize_out;
+		data += (height - 1) * linesize;
+		while (ptr < end) {
+			memcpy(ptr, data, row_copy);
+			ptr += linesize_out;
+			data -= linesize;
+		}
 
 	} else if (linesize == linesize_out) {
 		memcpy(ptr, data, row_copy * height);
 
 	} else {
-		for (y = 0; y < height; y++)
-			memcpy(ptr + (uint32_t)y * linesize_out,
-			       data + (uint32_t)y * linesize, row_copy);
+		uint8_t *const end = ptr + height * linesize_out;
+		while (ptr < end) {
+			memcpy(ptr, data, row_copy);
+			ptr += linesize_out;
+			data += linesize;
+		}
 	}
 
 	gs_texture_unmap(tex);
@@ -1229,6 +1245,7 @@ void gs_blend_state_pop(void)
 	gs_enable_blending(state->enabled);
 	gs_blend_function_separate(state->src_c, state->dest_c, state->src_a,
 				   state->dest_a);
+	gs_blend_op(state->op);
 
 	da_pop_back(graphics->blend_state_stack);
 }
@@ -1246,10 +1263,12 @@ void gs_reset_blend_state(void)
 	if (graphics->cur_blend_state.src_c != GS_BLEND_SRCALPHA ||
 	    graphics->cur_blend_state.dest_c != GS_BLEND_INVSRCALPHA ||
 	    graphics->cur_blend_state.src_a != GS_BLEND_ONE ||
-	    graphics->cur_blend_state.dest_a != GS_BLEND_INVSRCALPHA)
+	    graphics->cur_blend_state.dest_a != GS_BLEND_INVSRCALPHA) {
 		gs_blend_function_separate(GS_BLEND_SRCALPHA,
 					   GS_BLEND_INVSRCALPHA, GS_BLEND_ONE,
 					   GS_BLEND_INVSRCALPHA);
+		gs_blend_op(GS_BLEND_OP_ADD);
+	}
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1287,6 +1306,16 @@ void gs_resize(uint32_t x, uint32_t y)
 		return;
 
 	graphics->exports.device_resize(graphics->device, x, y);
+}
+
+void gs_update_color_space(void)
+{
+	graphics_t *graphics = thread_graphics;
+
+	if (!gs_valid("gs_update_color_space"))
+		return;
+
+	graphics->exports.device_update_color_space(graphics->device);
 }
 
 void gs_get_size(uint32_t *x, uint32_t *y)
@@ -1357,6 +1386,52 @@ gs_texture_t *gs_texture_create(uint32_t width, uint32_t height,
 						       height, color_format,
 						       levels, data, flags);
 }
+
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__DragonFly__)
+
+gs_texture_t *gs_texture_create_from_dmabuf(
+	unsigned int width, unsigned int height, uint32_t drm_format,
+	enum gs_color_format color_format, uint32_t n_planes, const int *fds,
+	const uint32_t *strides, const uint32_t *offsets,
+	const uint64_t *modifiers)
+{
+	graphics_t *graphics = thread_graphics;
+
+	return graphics->exports.device_texture_create_from_dmabuf(
+		graphics->device, width, height, drm_format, color_format,
+		n_planes, fds, strides, offsets, modifiers);
+}
+
+bool gs_query_dmabuf_capabilities(enum gs_dmabuf_flags *dmabuf_flags,
+				  uint32_t **drm_formats, size_t *n_formats)
+{
+	graphics_t *graphics = thread_graphics;
+
+	return graphics->exports.device_query_dmabuf_capabilities(
+		graphics->device, dmabuf_flags, drm_formats, n_formats);
+}
+
+bool gs_query_dmabuf_modifiers_for_format(uint32_t drm_format,
+					  uint64_t **modifiers,
+					  size_t *n_modifiers)
+{
+	graphics_t *graphics = thread_graphics;
+
+	return graphics->exports.device_query_dmabuf_modifiers_for_format(
+		graphics->device, drm_format, modifiers, n_modifiers);
+}
+
+gs_texture_t *gs_texture_create_from_pixmap(uint32_t width, uint32_t height,
+					    enum gs_color_format color_format,
+					    uint32_t target, void *pixmap)
+{
+	graphics_t *graphics = thread_graphics;
+
+	return graphics->exports.device_texture_create_from_pixmap(
+		graphics->device, width, height, color_format, target, pixmap);
+}
+
+#endif
 
 gs_texture_t *gs_cubetexture_create(uint32_t size,
 				    enum gs_color_format color_format,
@@ -1660,6 +1735,16 @@ gs_shader_t *gs_get_pixel_shader(void)
 	return graphics->exports.device_get_pixel_shader(graphics->device);
 }
 
+enum gs_color_space gs_get_color_space(void)
+{
+	graphics_t *graphics = thread_graphics;
+
+	if (!gs_valid("gs_get_color_space"))
+		return GS_CS_SRGB;
+
+	return graphics->exports.device_get_color_space(graphics->device);
+}
+
 gs_texture_t *gs_get_render_target(void)
 {
 	graphics_t *graphics = thread_graphics;
@@ -1691,6 +1776,19 @@ void gs_set_render_target(gs_texture_t *tex, gs_zstencil_t *zstencil)
 						   zstencil);
 }
 
+void gs_set_render_target_with_color_space(gs_texture_t *tex,
+					   gs_zstencil_t *zstencil,
+					   enum gs_color_space space)
+{
+	graphics_t *graphics = thread_graphics;
+
+	if (!gs_valid("gs_set_render_target_with_color_space"))
+		return;
+
+	graphics->exports.device_set_render_target_with_color_space(
+		graphics->device, tex, zstencil, space);
+}
+
 void gs_set_cube_render_target(gs_texture_t *cubetex, int side,
 			       gs_zstencil_t *zstencil)
 {
@@ -1701,6 +1799,50 @@ void gs_set_cube_render_target(gs_texture_t *cubetex, int side,
 
 	graphics->exports.device_set_cube_render_target(
 		graphics->device, cubetex, side, zstencil);
+}
+
+void gs_enable_framebuffer_srgb(bool enable)
+{
+	graphics_t *graphics = thread_graphics;
+
+	if (!gs_valid("gs_enable_framebuffer_srgb"))
+		return;
+
+	graphics->exports.device_enable_framebuffer_srgb(graphics->device,
+							 enable);
+}
+
+bool gs_framebuffer_srgb_enabled(void)
+{
+	graphics_t *graphics = thread_graphics;
+
+	if (!gs_valid("gs_framebuffer_srgb_enabled"))
+		return false;
+
+	return graphics->exports.device_framebuffer_srgb_enabled(
+		graphics->device);
+}
+
+bool gs_get_linear_srgb(void)
+{
+	graphics_t *graphics = thread_graphics;
+
+	if (!gs_valid("gs_get_linear_srgb"))
+		return false;
+
+	return graphics->linear_srgb;
+}
+
+bool gs_set_linear_srgb(bool linear_srgb)
+{
+	graphics_t *graphics = thread_graphics;
+
+	if (!gs_valid("gs_set_linear_srgb"))
+		return false;
+
+	const bool previous = graphics->linear_srgb;
+	graphics->linear_srgb = linear_srgb;
+	return previous;
 }
 
 void gs_copy_texture(gs_texture_t *dst, gs_texture_t *src)
@@ -1799,6 +1941,16 @@ void gs_clear(uint32_t clear_flags, const struct vec4 *color, float depth,
 
 	graphics->exports.device_clear(graphics->device, clear_flags, color,
 				       depth, stencil);
+}
+
+bool gs_is_present_ready(void)
+{
+	graphics_t *graphics = thread_graphics;
+
+	if (!gs_valid("gs_is_present_ready"))
+		return false;
+
+	return graphics->exports.device_is_present_ready(graphics->device);
 }
 
 void gs_present(void)
@@ -1923,6 +2075,18 @@ void gs_blend_function_separate(enum gs_blend_type src_c,
 	graphics->cur_blend_state.dest_a = dest_a;
 	graphics->exports.device_blend_function_separate(
 		graphics->device, src_c, dest_c, src_a, dest_a);
+}
+
+void gs_blend_op(enum gs_blend_op_type op)
+{
+	graphics_t *graphics = thread_graphics;
+
+	if (!gs_valid("gs_blend_op"))
+		return;
+
+	graphics->cur_blend_state.op = op;
+	graphics->exports.device_blend_op(graphics->device,
+					  graphics->cur_blend_state.op);
 }
 
 void gs_depth_function(enum gs_depth_test test)
@@ -2684,6 +2848,27 @@ bool gs_nv12_available(void)
 		thread_graphics->device);
 }
 
+bool gs_p010_available(void)
+{
+	if (!gs_valid("gs_p010_available"))
+		return false;
+
+	if (!thread_graphics->exports.device_p010_available)
+		return false;
+
+	return thread_graphics->exports.device_p010_available(
+		thread_graphics->device);
+}
+
+bool gs_is_monitor_hdr(void *monitor)
+{
+	if (!gs_valid("gs_is_monitor_hdr"))
+		return false;
+
+	return thread_graphics->exports.device_is_monitor_hdr(
+		thread_graphics->device, monitor);
+}
+
 void gs_debug_marker_begin(const float color[4], const char *markername)
 {
 	if (!gs_valid("gs_debug_marker_begin"))
@@ -2751,6 +2936,26 @@ bool gs_texture_rebind_iosurface(gs_texture_t *texture, void *iosurf)
 	return graphics->exports.gs_texture_rebind_iosurface(texture, iosurf);
 }
 
+bool gs_shared_texture_available(void)
+{
+	if (!gs_valid("gs_shared_texture_available"))
+		return false;
+
+	return thread_graphics->exports.device_shared_texture_available();
+}
+
+gs_texture_t *gs_texture_open_shared(uint32_t handle)
+{
+	graphics_t *graphics = thread_graphics;
+	if (!gs_valid("gs_texture_open_shared"))
+		return NULL;
+
+	if (graphics->exports.device_texture_open_shared)
+		return graphics->exports.device_texture_open_shared(
+			graphics->device, handle);
+	return NULL;
+}
+
 #elif _WIN32
 
 bool gs_gdi_texture_available(void)
@@ -2781,6 +2986,17 @@ bool gs_get_duplicator_monitor_info(int monitor_idx,
 		thread_graphics->device, monitor_idx, monitor_info);
 }
 
+int gs_duplicator_get_monitor_index(void *monitor)
+{
+	if (!gs_valid("gs_duplicator_get_monitor_index"))
+		return false;
+	if (!thread_graphics->exports.device_duplicator_get_monitor_index)
+		return false;
+
+	return thread_graphics->exports.device_duplicator_get_monitor_index(
+		thread_graphics->device, monitor);
+}
+
 gs_duplicator_t *gs_duplicator_create(int monitor_idx)
 {
 	if (!gs_valid("gs_duplicator_create"))
@@ -2808,10 +3024,31 @@ bool gs_duplicator_update_frame(gs_duplicator_t *duplicator)
 {
 	if (!gs_valid_p("gs_duplicator_update_frame", duplicator))
 		return false;
-	if (!thread_graphics->exports.gs_duplicator_get_texture)
+	if (!thread_graphics->exports.gs_duplicator_update_frame)
 		return false;
 
 	return thread_graphics->exports.gs_duplicator_update_frame(duplicator);
+}
+
+uint32_t gs_get_adapter_count(void)
+{
+	if (!gs_valid("gs_get_adapter_count"))
+		return 0;
+	if (!thread_graphics->exports.gs_get_adapter_count)
+		return 0;
+
+	return thread_graphics->exports.gs_get_adapter_count();
+}
+
+bool gs_can_adapter_fast_clear(void)
+{
+	if (!gs_valid("gs_can_adapter_fast_clear"))
+		return false;
+	if (!thread_graphics->exports.device_can_adapter_fast_clear)
+		return false;
+
+	return thread_graphics->exports.device_can_adapter_fast_clear(
+		thread_graphics->device);
 }
 
 gs_texture_t *gs_duplicator_get_texture(gs_duplicator_t *duplicator)
@@ -2822,6 +3059,28 @@ gs_texture_t *gs_duplicator_get_texture(gs_duplicator_t *duplicator)
 		return NULL;
 
 	return thread_graphics->exports.gs_duplicator_get_texture(duplicator);
+}
+
+enum gs_color_space gs_duplicator_get_color_space(gs_duplicator_t *duplicator)
+{
+	if (!gs_valid_p("gs_duplicator_get_color_space", duplicator))
+		return GS_CS_SRGB;
+	if (!thread_graphics->exports.gs_duplicator_get_color_space)
+		return GS_CS_SRGB;
+
+	return thread_graphics->exports.gs_duplicator_get_color_space(
+		duplicator);
+}
+
+float gs_duplicator_get_sdr_white_level(gs_duplicator_t *duplicator)
+{
+	if (!gs_valid_p("gs_duplicator_get_sdr_white_level", duplicator))
+		return 80.f;
+	if (!thread_graphics->exports.gs_duplicator_get_sdr_white_level)
+		return 80.f;
+
+	return thread_graphics->exports.gs_duplicator_get_sdr_white_level(
+		duplicator);
 }
 
 /** creates a windows GDI-lockable texture */
@@ -2869,6 +3128,18 @@ gs_texture_t *gs_texture_open_shared(uint32_t handle)
 	return NULL;
 }
 
+gs_texture_t *gs_texture_open_nt_shared(uint32_t handle)
+{
+	graphics_t *graphics = thread_graphics;
+	if (!gs_valid("gs_texture_open_nt_shared"))
+		return NULL;
+
+	if (graphics->exports.device_texture_open_nt_shared)
+		return graphics->exports.device_texture_open_nt_shared(
+			graphics->device, handle);
+	return NULL;
+}
+
 uint32_t gs_texture_get_shared_handle(gs_texture_t *tex)
 {
 	graphics_t *graphics = thread_graphics;
@@ -2878,6 +3149,18 @@ uint32_t gs_texture_get_shared_handle(gs_texture_t *tex)
 	if (graphics->exports.device_texture_get_shared_handle)
 		return graphics->exports.device_texture_get_shared_handle(tex);
 	return GS_INVALID_HANDLE;
+}
+
+gs_texture_t *gs_texture_wrap_obj(void *obj)
+{
+	graphics_t *graphics = thread_graphics;
+	if (!gs_valid("gs_texture_wrap_obj"))
+		return NULL;
+
+	if (graphics->exports.device_texture_wrap_obj)
+		return graphics->exports.device_texture_wrap_obj(
+			graphics->device, obj);
+	return NULL;
 }
 
 int gs_texture_acquire_sync(gs_texture_t *tex, uint64_t key, uint32_t ms)
@@ -2942,6 +3225,45 @@ bool gs_texture_create_nv12(gs_texture_t **tex_y, gs_texture_t **tex_uv,
 	return true;
 }
 
+bool gs_texture_create_p010(gs_texture_t **tex_y, gs_texture_t **tex_uv,
+			    uint32_t width, uint32_t height, uint32_t flags)
+{
+	graphics_t *graphics = thread_graphics;
+	bool success = false;
+
+	if (!gs_valid("gs_texture_create_p010"))
+		return false;
+
+	if ((width & 1) == 1 || (height & 1) == 1) {
+		blog(LOG_ERROR, "P010 textures must have dimensions "
+				"divisible by 2.");
+		return false;
+	}
+
+	if (graphics->exports.device_texture_create_p010) {
+		success = graphics->exports.device_texture_create_p010(
+			graphics->device, tex_y, tex_uv, width, height, flags);
+		if (success)
+			return true;
+	}
+
+	*tex_y = gs_texture_create(width, height, GS_R16, 1, NULL, flags);
+	*tex_uv = gs_texture_create(width / 2, height / 2, GS_RG16, 1, NULL,
+				    flags);
+
+	if (!*tex_y || !*tex_uv) {
+		if (*tex_y)
+			gs_texture_destroy(*tex_y);
+		if (*tex_uv)
+			gs_texture_destroy(*tex_uv);
+		*tex_y = NULL;
+		*tex_uv = NULL;
+		return false;
+	}
+
+	return true;
+}
+
 gs_stagesurf_t *gs_stagesurface_create_nv12(uint32_t width, uint32_t height)
 {
 	graphics_t *graphics = thread_graphics;
@@ -2957,6 +3279,26 @@ gs_stagesurf_t *gs_stagesurface_create_nv12(uint32_t width, uint32_t height)
 
 	if (graphics->exports.device_stagesurface_create_nv12)
 		return graphics->exports.device_stagesurface_create_nv12(
+			graphics->device, width, height);
+
+	return NULL;
+}
+
+gs_stagesurf_t *gs_stagesurface_create_p010(uint32_t width, uint32_t height)
+{
+	graphics_t *graphics = thread_graphics;
+
+	if (!gs_valid("gs_stagesurface_create_p010"))
+		return NULL;
+
+	if ((width & 1) == 1 || (height & 1) == 1) {
+		blog(LOG_ERROR, "P010 textures must have dimensions "
+				"divisible by 2.");
+		return NULL;
+	}
+
+	if (graphics->exports.device_stagesurface_create_p010)
+		return graphics->exports.device_stagesurface_create_p010(
 			graphics->device, width, height);
 
 	return NULL;

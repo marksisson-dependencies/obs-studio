@@ -22,6 +22,10 @@ using namespace json11;
 
 static string translate_key(const string &sl_key)
 {
+	if (sl_key.empty()) {
+		return "IGNORE";
+	}
+
 	if (sl_key.substr(0, 6) == "Numpad" && sl_key.size() == 7) {
 		return "OBS_KEY_NUM" + sl_key.substr(6);
 	} else if (sl_key.substr(0, 3) == "Key") {
@@ -172,6 +176,9 @@ static void get_hotkey_bindings(Json::object &out_hotkeys,
 			string key =
 				translate_key(binding["key"].string_value());
 
+			if (key == "IGNORE")
+				continue;
+
 			out_hotkey.push_back(
 				Json::object{{"control", modifiers["ctrl"]},
 					     {"shift", modifiers["shift"]},
@@ -224,6 +231,32 @@ static void get_scene_items(const Json &root, const Json::array &out_sources,
 		Json::object{{"items", out_items}, {"id_counter", length}};
 }
 
+static void translate_screen_capture(Json::object &out_settings, string &type)
+{
+	string subtype_info =
+		out_settings["capture_source_list"].string_value();
+	size_t pos = subtype_info.find(':');
+	string subtype = subtype_info.substr(0, pos);
+
+	if (subtype == "game") {
+		type = "game_capture";
+	} else if (subtype == "monitor") {
+		type = "monitor_capture";
+		out_settings["monitor"] = subtype_info.substr(pos);
+	} else if (subtype == "window") {
+		type = "window_capture";
+		out_settings["cursor"] = out_settings["capture_cursor"];
+		out_settings["window"] =
+			out_settings["capture_window_line"].string_value();
+		out_settings["capture_cursor"] = nullptr;
+	}
+	out_settings["auto_capture_rules_path"] = nullptr;
+	out_settings["auto_placeholder_image"] = nullptr;
+	out_settings["auto_placeholder_message"] = nullptr;
+	out_settings["capture_source_list"] = nullptr;
+	out_settings["capture_window_line"] = nullptr;
+}
+
 static int attempt_import(const Json &root, const string &name, Json &res)
 {
 	Json::array source_arr = root["sources"]["items"].array_items();
@@ -274,12 +307,18 @@ static int attempt_import(const Json &root, const string &name, Json &res)
 
 		string sl_id = source["id"].string_value();
 
+		string type = source["type"].string_value();
+		Json::object out_settings = in_settings.object_items();
+		if (type == "screen_capture") {
+			translate_screen_capture(out_settings, type);
+		}
+
 		out_sources.push_back(
 			Json::object{{"filters", out_filters},
 				     {"hotkeys", out_hotkeys},
-				     {"id", source["type"]},
+				     {"id", type},
 				     {"sl_id", sl_id},
-				     {"settings", in_settings},
+				     {"settings", out_settings},
 				     {"sync", sync},
 				     {"volume", vol},
 				     {"muted", muted},
@@ -298,15 +337,8 @@ static int attempt_import(const Json &root, const string &name, Json &res)
 		Json::array filter_items = in_filters["items"].array_items();
 
 		Json in_settings = scene["settings"];
-		Json in_sync = scene["syncOffset"];
 
-		int sync = (int)(in_sync["sec"].number_value() * 1000000000 +
-				 in_sync["nsec"].number_value());
-
-		double vol = scene["volume"].number_value();
-		bool muted = scene["muted"].bool_value();
 		string name = scene["name"].string_value();
-		int monitoring = scene["monitoringType"].int_value();
 
 		Json::object out_hotkeys = Json::object{};
 		get_hotkey_bindings(out_hotkeys, hotkey_items, "");
@@ -325,7 +357,7 @@ static int attempt_import(const Json &root, const string &name, Json &res)
 		while (source_name_exists(out_sources, out_name))
 			out_name = name + "(" + to_string(copy++) + ")";
 
-		if (scene_name == "")
+		if (scene_name.empty())
 			scene_name = out_name;
 
 		string sl_id = scene["id"].string_value();
@@ -336,11 +368,8 @@ static int attempt_import(const Json &root, const string &name, Json &res)
 				     {"id", "scene"},
 				     {"sl_id", sl_id},
 				     {"settings", in_settings},
-				     {"sync", sync},
-				     {"volume", vol},
-				     {"muted", muted},
+				     {"volume", 1.0},
 				     {"name", out_name},
-				     {"monitoring_type", monitoring},
 				     {"private_settings", Json::object{}}};
 
 		Json in_items = scene["sceneItems"];
@@ -409,7 +438,7 @@ string SLImporter::Name(const string &path)
 				string c_name = c["name"].string_value();
 
 				if (c_id == manifest_file) {
-					name = c_name;
+					name = std::move(c_name);
 					name_set = true;
 					break;
 				}
@@ -449,7 +478,10 @@ int SLImporter::ImportScenes(const string &path, string &name, Json &res)
 		}
 	}
 
+	QDir dir(path.c_str());
+
 	TranslateOSStudio(res);
+	TranslatePaths(res, QDir::cleanPath(dir.filePath("..")).toStdString());
 
 	return result;
 }
@@ -478,11 +510,12 @@ bool SLImporter::Check(const string &path)
 OBSImporterFiles SLImporter::FindFiles()
 {
 	OBSImporterFiles res;
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
 	char dst[512];
 
-	int found = os_get_config_path(dst, 512,
-				       "slobs-client\\SceneCollections\\");
+	int found =
+		os_get_config_path(dst, 512, "slobs-client/SceneCollections/");
+
 	if (found == -1)
 		return res;
 
@@ -496,7 +529,7 @@ OBSImporterFiles SLImporter::FindFiles()
 
 		size_t pos = name.find_last_of(".json");
 		size_t end_pos = name.size() - 1;
-		if (pos != -1 && pos == end_pos) {
+		if (pos != string::npos && pos == end_pos) {
 			string str = dst + name;
 			res.push_back(str);
 		}

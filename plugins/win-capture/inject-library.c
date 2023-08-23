@@ -1,6 +1,10 @@
 #include <windows.h>
 #include <stdbool.h>
-#include "obfuscate.h"
+#ifdef OBS_LEGACY
+#include "../../libobs/util/windows/obfuscate.h"
+#else
+#include <util/windows/obfuscate.h>
+#endif
 #include "inject-library.h"
 
 typedef HANDLE(WINAPI *create_remote_thread_t)(HANDLE, LPSECURITY_ATTRIBUTES,
@@ -37,16 +41,16 @@ int inject_library_obf(HANDLE process, const wchar_t *dll,
 	virtual_free_ex_t virtual_free_ex;
 	FARPROC load_library_w;
 
-	create_remote_thread =
-		get_obfuscated_func(kernel32, create_remote_thread_obf, obf1);
-	write_process_memory =
-		get_obfuscated_func(kernel32, write_process_memory_obf, obf2);
-	virtual_alloc_ex =
-		get_obfuscated_func(kernel32, virtual_alloc_ex_obf, obf3);
-	virtual_free_ex =
-		get_obfuscated_func(kernel32, virtual_free_ex_obf, obf4);
-	load_library_w =
-		get_obfuscated_func(kernel32, load_library_w_obf, obf5);
+	create_remote_thread = (create_remote_thread_t)ms_get_obfuscated_func(
+		kernel32, create_remote_thread_obf, obf1);
+	write_process_memory = (write_process_memory_t)ms_get_obfuscated_func(
+		kernel32, write_process_memory_obf, obf2);
+	virtual_alloc_ex = (virtual_alloc_ex_t)ms_get_obfuscated_func(
+		kernel32, virtual_alloc_ex_obf, obf3);
+	virtual_free_ex = (virtual_free_ex_t)ms_get_obfuscated_func(
+		kernel32, virtual_free_ex_obf, obf4);
+	load_library_w = (FARPROC)ms_get_obfuscated_func(
+		kernel32, load_library_w_obf, obf5);
 
 	/* -------------------------------- */
 
@@ -108,7 +112,7 @@ int inject_library_safe_obf(DWORD thread_id, const wchar_t *dll,
 	HMODULE user32 = GetModuleHandleW(L"USER32");
 	set_windows_hook_ex_t set_windows_hook_ex;
 	HMODULE lib = LoadLibraryW(dll);
-	LPVOID proc;
+	HOOKPROC proc;
 	HHOOK hook;
 	size_t i;
 
@@ -117,17 +121,17 @@ int inject_library_safe_obf(DWORD thread_id, const wchar_t *dll,
 	}
 
 #ifdef _WIN64
-	proc = GetProcAddress(lib, "dummy_debug_proc");
+	proc = (HOOKPROC)GetProcAddress(lib, "dummy_debug_proc");
 #else
-	proc = GetProcAddress(lib, "_dummy_debug_proc@12");
+	proc = (HOOKPROC)GetProcAddress(lib, "_dummy_debug_proc@12");
 #endif
 
 	if (!proc) {
 		return INJECT_ERROR_UNLIKELY_FAIL;
 	}
 
-	set_windows_hook_ex =
-		get_obfuscated_func(user32, set_windows_hook_ex_obf, obf1);
+	set_windows_hook_ex = (set_windows_hook_ex_t)ms_get_obfuscated_func(
+		user32, set_windows_hook_ex_obf, obf1);
 
 	hook = set_windows_hook_ex(WH_GETMESSAGE, proc, lib, thread_id);
 	if (!hook) {
